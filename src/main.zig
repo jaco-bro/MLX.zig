@@ -21,4 +21,5 @@ test "Redirects" {
     std.debug.print("\n=== MAIN.ZIG ===\n\n", .{});
     _ = @import("llm.zig");
     _ = @import("whisper.zig");
+    std.testing.refAllDecls(@import("mlx.zig"));
 }

@@ -50,8 +50,8 @@ pub const Tokenizer = struct {
         while (vocab_iter.next()) |entry| {
             const token_str = entry.key_ptr.*;
             const id = @as(u32, @intCast(entry.value_ptr.*.integer));
-            var buf = std.ArrayList(u8).init(allocator);
-            defer buf.deinit();
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
             var i: usize = 0;
             while (i < token_str.len) {
                 var replaced = false;
@@ -60,23 +60,23 @@ pub const Tokenizer = struct {
                         token_str[i] == repl.bytes[0] and
                         token_str[i + 1] == repl.bytes[1])
                     {
-                        try buf.append(repl.replacement);
+                        try buf.append(allocator, repl.replacement);
                         i += 2;
                         replaced = true;
                         break;
                     }
                 }
                 if (!replaced) {
-                    try buf.append(token_str[i]);
+                    try buf.append(allocator, token_str[i]);
                     i += 1;
                 }
             }
-            const processed_token = try buf.toOwnedSlice();
+            const processed_token = try buf.toOwnedSlice(allocator);
             try vocab.put(processed_token, id);
             try id_to_token.put(id, processed_token);
         }
-        var special_tokens = std.ArrayList([]const u8).init(allocator);
-        defer special_tokens.deinit();
+        var special_tokens: std.ArrayList([]const u8) = .empty;
+        defer special_tokens.deinit(allocator);
         const added_tokens = parsed.value.object.get("added_tokens").?.array;
         for (added_tokens.items) |token| {
             if (token != .object) continue;
@@ -92,7 +92,7 @@ pub const Tokenizer = struct {
             const token_copy = try allocator.dupe(u8, token_str);
             try vocab.put(token_copy, token_id);
             try id_to_token.put(token_id, token_copy);
-            try special_tokens.append(token_copy);
+            try special_tokens.append(allocator, token_copy);
         }
         const specials = try allocator.dupe([]const u8, special_tokens.items);
         const special_regex = try createSpecialRegex(allocator, specials);
@@ -111,17 +111,27 @@ pub const Tokenizer = struct {
         var pattern_regex = try Regex.init(pattern);
         errdefer pattern_regex.deinit();
         var vocab = std.StringHashMap(u32).init(allocator);
-        errdefer vocab.deinit();
+        errdefer {
+            var it = vocab.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+            }
+            vocab.deinit();
+        }
         var id_to_token = std.AutoHashMap(u32, []const u8).init(allocator);
         errdefer id_to_token.deinit();
         const file = try std.fs.cwd().openFile(vocabulary_path, .{});
         defer file.close();
-        var buf_reader = std.io.bufferedReader(file.reader());
-        var in_stream = buf_reader.reader();
-        var line_buf: [1024]u8 = undefined;
-        while (try in_stream.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
+
+        var buf: [1024]u8 = undefined;
+        var buf_reader = file.reader(&buf);
+        while (true) {
+            const line = buf_reader.interface.takeDelimiterExclusive('\n') catch break;
             if (line.len == 0) continue;
-            var iter = std.mem.tokenize(u8, line, " ");
+
+            // std.debug.print("Line: {s}\n", .{line});
+
+            var iter = std.mem.tokenizeScalar(u8, line, ' ');
             const token_b64 = iter.next() orelse continue;
             const rank_str = iter.next() orelse continue;
             if (std.mem.eql(u8, token_b64, "=")) {
@@ -139,6 +149,7 @@ pub const Tokenizer = struct {
             try vocab.put(token, rank);
             try id_to_token.put(rank, token);
         }
+
         const special_start = @as(u32, @intCast(vocab.count()));
         for (specials, 0..) |special, i| {
             const token = try allocator.dupe(u8, special);
@@ -206,18 +217,18 @@ pub const Tokenizer = struct {
 
     fn createSpecialRegex(allocator: std.mem.Allocator, specials: []const []const u8) !?Regex {
         if (specials.len == 0) return null;
-        var pattern = std.ArrayList(u8).init(allocator);
-        defer pattern.deinit();
+        var pattern: std.ArrayList(u8) = .empty;
+        defer pattern.deinit(allocator);
         var first = true;
         for (specials) |special| {
             if (!first) {
-                try pattern.append('|');
+                try pattern.append(allocator, '|');
             } else {
                 first = false;
             }
             for (special) |char| {
-                if (std.mem.indexOfScalar(u8, "\\^$.|?*+()[{", char) != null) try pattern.append('\\');
-                try pattern.append(char);
+                if (std.mem.indexOfScalar(u8, "\\^$.|?*+()[{", char) != null) try pattern.append(allocator, '\\');
+                try pattern.append(allocator, char);
             }
         }
         if (pattern.items.len == 0) return null;
@@ -225,15 +236,15 @@ pub const Tokenizer = struct {
     }
 
     fn splitWithSpecials(self: *Self, text: []const u8) !std.ArrayList([]const u8) {
-        var result = std.ArrayList([]const u8).init(self.allocator);
+        var result: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (result.items) |item| {
                 self.allocator.free(item);
             }
-            result.deinit();
+            result.deinit(self.allocator);
         }
         if (self.special_regex == null) {
-            try result.append(try self.allocator.dupe(u8, text));
+            try result.append(self.allocator, try self.allocator.dupe(u8, text));
             return result;
         }
         var last_end: usize = 0;
@@ -244,30 +255,30 @@ pub const Tokenizer = struct {
             const match = match_result.?;
             if (match.start > last_end) {
                 const non_match = try self.allocator.dupe(u8, text[last_end..match.start]);
-                try result.append(non_match);
+                try result.append(self.allocator, non_match);
             }
             const matched_special = try self.allocator.dupe(u8, text[match.start..match.end]);
-            try result.append(matched_special);
+            try result.append(self.allocator, matched_special);
             last_end = match.end;
             start = match.end;
         }
         if (last_end < text.len) {
             const remaining = try self.allocator.dupe(u8, text[last_end..]);
-            try result.append(remaining);
+            try result.append(self.allocator, remaining);
         }
         return result;
     }
 
     fn splitWithPattern(self: *Self, text: []const u8) !std.ArrayList([]const u8) {
-        var result = std.ArrayList([]const u8).init(self.allocator);
+        var result: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (result.items) |item| {
                 self.allocator.free(item);
             }
-            result.deinit();
+            result.deinit(self.allocator);
         }
         if (self.pattern_regex == null) {
-            try result.append(try self.allocator.dupe(u8, text));
+            try result.append(self.allocator, try self.allocator.dupe(u8, text));
             return result;
         }
         var start: usize = 0;
@@ -276,31 +287,31 @@ pub const Tokenizer = struct {
             if (match_result == null) {
                 if (start < text.len) {
                     const remaining = try self.allocator.dupe(u8, text[start..]);
-                    try result.append(remaining);
+                    try result.append(self.allocator, remaining);
                 }
                 break;
             }
             const match = match_result.?;
             const matched_text = try self.allocator.dupe(u8, text[match.start..match.end]);
-            try result.append(matched_text);
+            try result.append(self.allocator, matched_text);
             start = match.end;
         }
         return result;
     }
 
     fn bpeMerges(self: *Self, token: []const u8) !std.ArrayList(u32) {
-        var result = std.ArrayList(u32).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u32) = .empty;
+        errdefer result.deinit(self.allocator);
         if (self.vocab.get(token)) |id| {
-            try result.append(id);
+            try result.append(self.allocator, id);
             return result;
         }
         if (token.len == 0) return result;
-        var boundaries = std.ArrayList(usize).init(self.allocator);
-        defer boundaries.deinit();
-        try boundaries.append(0);
+        var boundaries: std.ArrayList(usize) = .empty;
+        defer boundaries.deinit(self.allocator);
+        try boundaries.append(self.allocator, 0);
         for (1..token.len + 1) |i| {
-            try boundaries.append(i);
+            try boundaries.append(self.allocator, i);
         }
         var did_merge = true;
         while (did_merge and boundaries.items.len > 2) {
@@ -329,10 +340,10 @@ pub const Tokenizer = struct {
             const end = boundaries.items[i + 1];
             const segment = token[start..end];
             if (self.vocab.get(segment)) |id| {
-                try result.append(id);
+                try result.append(self.allocator, id);
             } else {
                 std.debug.print("Warning: No ID found for segment: '{s}'\n", .{segment});
-                try result.append(0);
+                try result.append(self.allocator, 0);
             }
         }
         return result;
@@ -340,18 +351,18 @@ pub const Tokenizer = struct {
 
     pub fn encode(self: *Self, text: []const u8) ![]const u32 {
         std.debug.print("\nInput to encode: {s}\n", .{text});
-        var result = std.ArrayList(u32).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u32) = .empty;
+        errdefer result.deinit(self.allocator);
         var parts = try self.splitWithSpecials(text);
         defer {
             for (parts.items) |part| {
                 self.allocator.free(part);
             }
-            parts.deinit();
+            parts.deinit(self.allocator);
         }
         for (parts.items) |part| {
             if (self.vocab.get(part)) |id| {
-                try result.append(id);
+                try result.append(self.allocator, id);
                 continue;
             }
             var tokens = try self.splitWithPattern(part);
@@ -359,28 +370,28 @@ pub const Tokenizer = struct {
                 for (tokens.items) |token| {
                     self.allocator.free(token);
                 }
-                tokens.deinit();
+                tokens.deinit(self.allocator);
             }
             for (tokens.items) |token| {
                 var token_ids = try self.bpeMerges(token);
-                defer token_ids.deinit();
-                try result.appendSlice(token_ids.items);
+                defer token_ids.deinit(self.allocator);
+                try result.appendSlice(self.allocator, token_ids.items);
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     pub fn decode(self: *Self, token_ids: []const u32) ![]const u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(self.allocator);
         for (token_ids) |id| {
             if (self.id_to_token.get(id)) |token| {
-                try result.appendSlice(token);
+                try result.appendSlice(self.allocator, token);
             } else {
                 std.debug.print("Warning: Unknown token ID: {d}\n", .{id});
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     pub fn encodeChat(self: *Self, chat_format: ?[]const u8, replacements: []const []const u8) ![]const u32 {
@@ -401,6 +412,13 @@ test "Tokenizer round-trip" {
     std.debug.print("\n=== TOKENIZER.ZIG ===\n\n", .{});
     const allocator = std.testing.allocator;
     const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+    const reserved = try formatRange(allocator, "<|reserved_special_token_{d}|>", 2, 247);
+    defer {
+        for (reserved) |token| {
+            allocator.free(token);
+        }
+    }
+
     const specials = [_][]const u8{
         "<|begin_of_text|>",
         "<|end_of_text|>",
@@ -413,7 +431,7 @@ test "Tokenizer round-trip" {
         "<|eom_id|>",
         "<|eot_id|>",
         "<|python_tag|>",
-    } ++ comptime formatRange("<|reserved_special_token_{d}|>", 2, 247);
+    } ++ reserved;
     var tokenizer = try Tokenizer.initFromTikToken(allocator, pattern, "tokenizer.model", &specials);
     defer tokenizer.deinit();
     const text =
@@ -432,7 +450,7 @@ test "Tokenizer round-trip" {
     std.debug.print("1. Encoding text to token IDs...\n", .{});
     const token_ids = try tokenizer.encode(text);
     defer allocator.free(token_ids);
-    std.debug.print("   Result: {d} tokens\n", .{token_ids});
+    std.debug.print("   Result: {any} tokens\n", .{token_ids});
     for (token_ids, 0..) |id, i| {
         if (tokenizer.id_to_token.get(id)) |token| {
             std.debug.print("   Token {d}: ID {d} = '{s}'\n", .{ i, id, token });

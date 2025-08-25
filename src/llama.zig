@@ -114,7 +114,7 @@ pub const Attention = struct {
         try mlx.rEpeat(&v, v, "b h l d -> b (repeat h) l d", .{ .repeat = self.n_repeat }, self.base.stream);
         try mlx.einsum(&w, .{ q, k }, "b h l d, b h k d -> b h l k", self.base.stream);
         if (mask) |m| try mlx.add(&w, w, m, self.base.stream);
-        try mlx.softmax(&w, w, &.{3}, true, self.base.stream);
+        try mlx.softmax_axes(&w, w, &.{3}, true, self.base.stream);
         try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.base.stream);
         try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.base.stream);
         try self.o_weight.forward(result, w);

@@ -4,24 +4,49 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const deps = try setupDependencies(b, target, optimize);
+
+    // Create the mlxzig module for external consumption
+    const mlxzig = b.addModule("mlxzig", .{
+        .root_source_file = b.path("src/mlx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "mlxzig",
+        .root_module = mlxzig,
+    });
+    configureExecutable(lib, b, deps);
+    b.installArtifact(lib);
+
     const llm_options = try LlmOptions.fromOptions(b);
-    const llm_exe = b.addExecutable(.{
-        .name = "llm",
+    const llm_module = b.createModule(.{
         .root_source_file = b.path("src/llm.zig"),
         .target = target,
         .optimize = optimize,
     });
-    llm_exe.root_module.addImport("build_options", llm_options.createModule(b));
+    llm_module.addImport("build_options", llm_options.createModule(b));
+    const llm_exe = b.addExecutable(.{
+        .name = "llm",
+        .root_module = llm_module,
+    });
     configureExecutable(llm_exe, b, deps);
     b.installArtifact(llm_exe);
-    const whisper_exe = b.addExecutable(.{
-        .name = "whisper",
+
+    const whisper_module = b.createModule(.{
         .root_source_file = b.path("src/whisper.zig"),
         .target = target,
         .optimize = optimize,
     });
+    whisper_module.addImport("build_options", llm_options.createModule(b));
+    const whisper_exe = b.addExecutable(.{
+        .name = "whisper",
+        .root_module = whisper_module,
+    });
     configureExecutable(whisper_exe, b, deps);
     b.installArtifact(whisper_exe);
+
     const llm_run = b.addRunArtifact(llm_exe);
     if (b.args) |args| llm_run.addArgs(args);
     const run_llm = b.step("run-llm", "Run LLM app");
@@ -33,11 +58,15 @@ pub fn build(b: *std.Build) !void {
     const run_step = b.step("run", "Run default app"); // : run=run-llm for now
     run_step.dependOn(&llm_run.step);
     const test_step = b.step("test", "Run all tests");
-    const main_tests = b.addTest(.{
+    const main_test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const main_tests = b.addTest(.{
+        .root_module = main_test_module,
+    });
+
     configureExecutable(main_tests, b, deps);
     const run_main_tests = b.addRunArtifact(main_tests);
     test_step.dependOn(&run_main_tests.step);
@@ -87,7 +116,7 @@ fn setupDependencies(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     const install_step = b.step("install-mlx-c", "Install MLX-C if needed");
     const needs_install = !doesFileExist(mlx_c_lib_path);
     if (needs_install) {
-        const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then mkdir -p $(dirname {s}) && curl -L https://github.com/ml-explore/mlx-c/archive/refs/tags/v0.1.2.tar.gz | tar xz -C $(dirname {s}) && mv $(dirname {s})/mlx-c-0.1.2 {s}; fi", .{ mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path }) });
+        const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then mkdir -p $(dirname {s}) && curl -L https://github.com/ml-explore/mlx-c/archive/refs/tags/v0.2.0.tar.gz | tar xz -C $(dirname {s}) && mv $(dirname {s})/mlx-c-0.2.0 {s}; fi", .{ mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path }) });
         const mkdir_cmd = b.addSystemCommand(&[_][]const u8{ "mkdir", "-p", mlx_c_build_path });
         mkdir_cmd.step.dependOn(&clone_cmd.step);
         const cmake_cmd = b.addSystemCommand(&[_][]const u8{ "cmake", "..", "-DCMAKE_BUILD_TYPE=Release" });

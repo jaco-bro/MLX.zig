@@ -1,10 +1,11 @@
 .{
-    .name = "mlx.zig",
+    .name = .mlxzig,
     .version = "0.0.0",
+    .fingerprint = 0xc96e668b55af36b5,
     .dependencies = .{
         .pcre2 = .{
-            .url = "https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-10.45.tar.gz",
-            .hash = "1220c927731a4b31f5ebf8b4f33f0efe6fa1561cdcf026f39cbee512e08ad24fb785",
+            .url = "git+https://github.com/PCRE2Project/pcre2#7c7a27442279f5b53cd9c1c320e7a5fa662b48e7",
+            .hash = "N-V-__8AAPaj4AA7tqCGizncMhl8gm8AX1wmXFaB7jH2tJoq",
         },
     },
     .paths = .{

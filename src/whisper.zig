@@ -332,7 +332,7 @@ pub const Whisper = struct {
             try mlx.createCausalMask(&mask, mlx.arrayDim(toks, 1), kv_cache.offset, mlx.FLOAT16, self.base.stream);
             try self.decoder.forward(&logits, toks, enc, mask, &kv_cache, &cross_kv_cache);
             try mlx.take(&logits, logits, mlx.int(-1), 1, self.base.stream);
-            try mlx.argmax(&logits, logits, 1, false, self.base.stream);
+            try mlx.argmax_axis(&logits, logits, 1, false, self.base.stream);
             try mlx.item(&output_tokens[i], logits);
             kv_cache.offset += mlx.arrayDim(toks, 1);
             try mlx.arraySetData(&toks, &output_tokens[i], .{ 1, 1 }, mlx.UINT32);
@@ -364,25 +364,46 @@ pub const Transcriber = struct {
         errdefer mlx_config.deinit();
         const model_config = try utils.loadConfigJson(WhisperConfig, allocator, model_path, true);
         defer model_config.deinit();
+
         // Option 1. from hf json:
         // const tokenizer = try Tokenizer.init(allocator, model_path);
         // Option 2. from tiktoken:
+        const t = try utils.formatRange(allocator, "<|_{d}|>", 0, 100);
+        defer {
+            for (t) |item| {
+                allocator.free(item);
+            }
+        }
+        const floats = try utils.formatRangeFloat(allocator, 1501);
+        defer {
+            for (floats) |item| {
+                allocator.free(item);
+            }
+        }
+
         const pattern = "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
         const specials = [_][]const u8{
             "<|endoftext|>",
             "<|startoftranscript|>",
-        } ++ utils.formatRange("<|_{d}|>", 0, 100) ++ [_][]const u8{
+        } ++ t ++ [_][]const u8{
             "<|translate|>",
             "<|transcribe|>",
             "<|startoflm|>",
             "<|startofprev|>",
             "<|nospeech|>",
             "<|notimestamps|>",
-        } ++ utils.formatRangeFloat(1501);
-        const tokenizer = try Tokenizer.initFromTikToken(allocator, pattern, "multilingual.tiktoken", &specials);
+        } ++ floats;
+        var tokenizer = try Tokenizer.initFromTikToken(allocator, pattern, "multilingual.tiktoken", &specials);
+        errdefer tokenizer.deinit();
         var model = try Whisper.init("model", model_config.value, &mlx_config);
         errdefer model.deinit();
-        try mlx.loadModelSafetensors(&mlx_config.weights_hash, model_path, mlx_config.stream);
+
+        // mlx now requires that safetensors are loaded from the CPU stream
+        const cpu_stream = mlx.defaultCpuStreamNew();
+        defer mlx.streamFree(cpu_stream);
+
+        try mlx.loadModelSafetensors(&mlx_config.weights_hash, model_path, cpu_stream);
+
         try model.encoder.conv1.sanitize();
         try model.encoder.conv2.sanitize();
         return .{
@@ -399,9 +420,13 @@ pub const Transcriber = struct {
         defer mlx.arrayFree(mel_all);
         var mel = mlx.arrayNew();
         defer mlx.arrayFree(mel);
-        try getMel(&mel_all, audio, self.mlx_config.stream);
-        var new_tok = std.ArrayList(u32).init(self.mlx_config.allocator);
-        defer new_tok.deinit();
+
+        // mlx now requires that safetensors are loaded from the CPU stream
+        const cpu_stream = mlx.defaultCpuStreamNew();
+        defer mlx.streamFree(cpu_stream);
+        try getMel(&mel_all, audio, cpu_stream);
+        var new_tok: std.ArrayList(u32) = .empty;
+        defer new_tok.deinit(self.mlx_config.allocator);
         var i: c_int = 0;
         const mel_len = mlx.arrayDim(mel_all, 1);
         const start_time = std.time.milliTimestamp();
@@ -411,18 +436,18 @@ pub const Transcriber = struct {
             const piece = try self.model.forward(&buf, mel);
             const arg_hop = std.mem.indexOfMax(u32, piece);
             const hop = (piece[arg_hop] - 50365) * 2;
-            try new_tok.appendSlice(piece[0..arg_hop]);
+            try new_tok.appendSlice(self.mlx_config.allocator, piece[0..arg_hop]);
             i += if (hop > 0) @intCast(hop) else 3000;
         }
         const elapsed: f16 = @floatFromInt(std.time.milliTimestamp() - start_time);
         const ntok = new_tok.items.len;
         const tps = @as(f16, @floatFromInt(ntok)) / (elapsed / 1000.0);
         std.debug.print("\n{d:.2} tokens-per-second ({d} tokens in {d:.2} ms)\n", .{ tps, ntok, elapsed });
-        var filtered_tokens = std.ArrayList(u32).init(self.mlx_config.allocator);
-        defer filtered_tokens.deinit();
+        var filtered_tokens: std.ArrayList(u32) = .empty;
+        defer filtered_tokens.deinit(self.mlx_config.allocator);
         for (new_tok.items) |token| {
             if (token < 50257) {
-                try filtered_tokens.append(token);
+                try filtered_tokens.append(self.mlx_config.allocator, token);
             }
         }
         return try self.tokenizer.decode(filtered_tokens.items);
@@ -455,7 +480,7 @@ fn getMel(result: *mlx.Array, audio_raw: []f32, stream: mlx.Stream) !void {
     defer mlx.arrayFree(slice2);
     try mlx.slice(&slice1, audio, &[_]c_int{200}, &[_]c_int{0}, &[_]c_int{-1}, stream);
     try mlx.slice(&slice2, audio, &[_]c_int{-2}, &[_]c_int{-202}, &[_]c_int{-1}, stream);
-    try mlx.concatenate(&audio, .{ slice1, audio, slice2 }, 0, stream);
+    try mlx.concatenate_axis(&audio, .{ slice1, audio, slice2 }, 0, stream);
     try mlx.asStrided(&audio, audio, &[_]c_int{ @divTrunc(mlx.arrayDim(audio, 0) - 240, 160), 400 }, &[_]i64{ 160, 1 }, 0, stream);
     try mlx.multiply(&audio, audio, hanp, stream);
     try mlx.rfft(&audio, audio, 400, 1, stream);
@@ -470,7 +495,7 @@ fn getMel(result: *mlx.Array, audio_raw: []f32, stream: mlx.Stream) !void {
     try mlx.maximum(&audio, audio, threshold, stream);
     try mlx.add(&audio, audio, mlx.float(4.0), stream);
     try mlx.divide(&audio, audio, mlx.float(4.0), stream);
-    try mlx.expand_dims(&audio, audio, &[_]c_int{0}, stream);
+    try mlx.expand_dims_axes(&audio, audio, &[_]c_int{0}, stream);
     try mlx.astype(result, audio, mlx.FLOAT16, stream);
     try mlx.arrayEval(result.*);
 }
@@ -522,7 +547,7 @@ fn printUsage() void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
     printUsage();

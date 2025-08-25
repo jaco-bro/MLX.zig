@@ -96,7 +96,7 @@ pub const Attention = struct {
             mlx.arrayFree(v);
         }
         try self.qkv_proj.forward(&qkv, x);
-        try mlx.split(&.{ &q, &k, &v }, qkv, &[_]c_int{ self.q_pos, self.k_pos }, 2, self.base.stream);
+        try mlx.split_sections(&.{ &q, &k, &v }, qkv, &[_]c_int{ self.q_pos, self.k_pos }, 2, self.base.stream);
         try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.base.stream);
         try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.base.stream);
         try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.base.stream);

@@ -23,13 +23,13 @@ pub fn downloadModel(allocator_: std.mem.Allocator, repo_name_: []const u8, mode
             const first_entry = iter.next() orelse return null;
             if (first_entry.value_ptr.* != .string) return null;
             const pattern = first_entry.value_ptr.*.string;
-            var files = std.ArrayList([]const u8).init(allocator);
+            var files: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (files.items) |file| allocator.free(file);
-                files.deinit();
+                files.deinit(allocator);
             }
-            try files.append(try allocator.dupe(u8, "config.json"));
-            try files.append(try allocator.dupe(u8, "tokenizer.json"));
+            try files.append(allocator, try allocator.dupe(u8, "config.json"));
+            try files.append(allocator, try allocator.dupe(u8, "tokenizer.json"));
             if (std.mem.indexOf(u8, pattern, "-of-")) |idx| {
                 const total_part = pattern[idx + 4 ..];
                 const dash_idx = std.mem.indexOf(u8, total_part, "-") orelse
@@ -40,12 +40,12 @@ pub fn downloadModel(allocator_: std.mem.Allocator, repo_name_: []const u8, mode
                 const ext = pattern[std.mem.lastIndexOf(u8, pattern, ".").?..];
                 for (1..count + 1) |i| {
                     const filename = try std.fmt.allocPrint(allocator, "{s}-{:0>5}-of-{:0>5}{s}", .{ base, i, count, ext });
-                    try files.append(filename);
+                    try files.append(allocator, filename);
                 }
             } else {
-                try files.append(try allocator.dupe(u8, pattern));
+                try files.append(allocator, try allocator.dupe(u8, pattern));
             }
-            const result = try files.toOwnedSlice();
+            const result = try files.toOwnedSlice(allocator);
             return result;
         }
     }.getModelFiles;
@@ -78,31 +78,31 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
         "tokenizer.json",
     };
     const filenames = if (file_names) |f| f else &default_filenames;
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
-    try args.append("curl");
-    try args.append("--location");
-    try args.append("--parallel");
-    var paths_to_free = std.ArrayList([]const u8).init(allocator);
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+    try args.append(allocator, "curl");
+    try args.append(allocator, "--location");
+    try args.append(allocator, "--parallel");
+    var paths_to_free: std.ArrayList([]const u8) = .empty;
     defer {
         for (paths_to_free.items) |path| {
             allocator.free(path);
         }
-        paths_to_free.deinit();
+        paths_to_free.deinit(allocator);
     }
     var all_exist = true;
     for (filenames) |filename| {
         const local_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ model_name, filename });
-        try paths_to_free.append(local_path);
+        try paths_to_free.append(allocator, local_path);
         if (fileExists(local_path)) {
             std.debug.print("File '{s}' already exists. Skipping download.\n", .{local_path});
         } else {
             all_exist = false;
             const url_path = try std.fmt.allocPrint(allocator, "https://huggingface.co/{s}/{s}/resolve/main/{s}", .{ repo_name, model_name, filename });
-            try paths_to_free.append(url_path);
-            try args.append(url_path);
-            try args.append("-o");
-            try args.append(local_path);
+            try paths_to_free.append(allocator, url_path);
+            try args.append(allocator, url_path);
+            try args.append(allocator, "-o");
+            try args.append(allocator, local_path);
         }
     }
     if (all_exist) {
@@ -133,44 +133,44 @@ pub fn formatDynamic(
     chat_fmt: []const u8,
     replacements: []const []const u8,
 ) ![]const u8 {
-    var segments = std.ArrayList([]const u8).init(allocator);
-    defer segments.deinit();
+    var segments: std.ArrayList([]const u8) = .empty;
+    defer segments.deinit(allocator);
     var splitter = std.mem.splitSequence(u8, chat_fmt, "{s}");
     while (splitter.next()) |segment| {
-        try segments.append(segment);
+        try segments.append(allocator, segment);
     }
     const expected_replacements = segments.items.len - 1;
     if (replacements.len != expected_replacements) {
         return error.ReplacementCountMismatch;
     }
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
     for (segments.items[0 .. segments.items.len - 1], replacements) |segment, replacement| {
-        try result.appendSlice(segment);
-        try result.appendSlice(replacement);
+        try result.appendSlice(allocator, segment);
+        try result.appendSlice(allocator, replacement);
     }
-    try result.appendSlice(segments.items[segments.items.len - 1]);
-    return try result.toOwnedSlice();
+    try result.appendSlice(allocator, segments.items[segments.items.len - 1]);
+    return try result.toOwnedSlice(allocator);
 }
 
-pub fn formatRange(comptime format: []const u8, comptime start: usize, comptime end: usize) [end - start][]const u8 {
+pub fn formatRange(allocator: std.mem.Allocator, comptime format: []const u8, comptime start: usize, comptime end: usize) ![end - start][]const u8 {
     var result: [end - start][]const u8 = undefined;
     inline for (&result, 0..) |*ptr, i| {
-        ptr.* = std.fmt.comptimePrint(format, .{start + i});
+        ptr.* = try std.fmt.allocPrint(allocator, format, .{start + i});
     }
     return result;
 }
 
-pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
+pub fn formatRangeFloat(allocator: std.mem.Allocator, comptime count: usize) ![count][]const u8 {
     var result: [count][]const u8 = undefined;
-    inline for (&result, 0..) |*ptr, i| {
+    for (&result, 0..) |*ptr, i| {
         const seconds = @as(f32, @floatFromInt(i)) * 0.02;
         const whole = @as(u32, @intFromFloat(seconds));
         const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5));
         if (frac < 10) {
-            ptr.* = std.fmt.comptimePrint("<|{d}.0{d}|>", .{ whole, frac });
+            ptr.* = try std.fmt.allocPrint(allocator, "<|{d}.0{d}|>", .{ whole, frac });
         } else {
-            ptr.* = std.fmt.comptimePrint("<|{d}.{d}|>", .{ whole, frac });
+            ptr.* = try std.fmt.allocPrint(allocator, "<|{d}.{d}|>", .{ whole, frac });
         }
     }
     return result;
@@ -205,14 +205,15 @@ pub fn loadAudio(allocator: std.mem.Allocator, audio_file: []const u8) ![]f32 {
     process.stdout_behavior = .Pipe;
     process.stderr_behavior = .Pipe;
     try process.spawn();
-    var float_samples = std.ArrayList(f32).init(allocator);
-    defer float_samples.deinit();
-    try float_samples.ensureTotalCapacity(16000 * 10);
-    const stdout = process.stdout.?.reader();
+    var float_samples: std.ArrayList(f32) = .empty;
+    defer float_samples.deinit(allocator);
+    try float_samples.ensureTotalCapacity(allocator, 16000 * 10);
+    var stdout_buf: [buffer_size]u8 = undefined;
+    var stdout = process.stdout.?.readerStreaming(&stdout_buf);
     var buffer: [buffer_size]u8 = undefined;
     var i16_buffer: [buffer_size / 2]i16 = undefined;
     while (true) {
-        const bytes_read = try stdout.read(&buffer);
+        const bytes_read = stdout.read(&buffer) catch break;
         if (bytes_read == 0) break;
         const valid_bytes = bytes_read & ~@as(usize, 1);
         const samples = valid_bytes / 2;
@@ -223,36 +224,37 @@ pub fn loadAudio(allocator: std.mem.Allocator, audio_file: []const u8) ![]f32 {
             const hi = @as(i16, @intCast(buffer[i + 1]));
             i16_buffer[sample_idx] = lo | (hi << 8);
         }
-        try float_samples.ensureUnusedCapacity(samples);
+        try float_samples.ensureUnusedCapacity(allocator, samples);
         for (i16_buffer[0..samples]) |sample| {
-            try float_samples.append(@as(f32, @floatFromInt(sample)) / 32768.0);
+            try float_samples.append(allocator, @as(f32, @floatFromInt(sample)) / 32768.0);
         }
     }
+
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr = process.stderr.?.readerStreaming(&stderr_buf);
+    var err_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer err_writer.deinit();
+    const stderr_cnt = stderr.interface.stream(&err_writer.writer, .unlimited) catch 0;
+    try err_writer.writer.flush();
+
     const term = try process.wait();
-    if (term != .Exited or term.Exited != 0) {
-        const stderr = process.stderr.?.reader();
-        var error_msg = std.ArrayList(u8).init(allocator);
-        defer error_msg.deinit();
-        try stderr.readAllArrayList(&error_msg, 4096);
-        std.log.err("Failed to load audio: {s}", .{error_msg.items});
+    if (term != .Exited or term.Exited != 0 or stderr_cnt > 0) {
+        std.log.err("Failed to load audio: {s}", .{try err_writer.toOwnedSlice()});
         return error.FfmpegFailed;
     }
-    return float_samples.toOwnedSlice();
+    return float_samples.toOwnedSlice(allocator);
 }
 
 pub fn loadJson(comptime T: type, allocator: std.mem.Allocator, filename: []const u8, verbose: bool) !std.json.Parsed(T) {
     const printVals = struct {
-        fn printParsedValue(comptime T_: type, value: T_, allocator_: std.mem.Allocator) !void {
-            var string = std.ArrayList(u8).init(allocator_);
-            defer string.deinit();
-            try std.json.stringify(value, .{ .whitespace = .indent_2 }, string.writer());
+        fn printParsedValue(T_: type, value: T_, _: std.mem.Allocator) !void {
             std.debug.print("\nParsed Value:\n", .{});
-            std.debug.print("{s}\n", .{string.items});
+            std.debug.print("{f}\n", .{std.json.fmt(value, .{ .whitespace = .indent_2 })});
         }
     }.printParsedValue;
     const printDiff = struct {
         fn printFieldDifferences(comptime T_: type, allocator_: std.mem.Allocator, json_string: []const u8) !void {
-            const struct_info = @typeInfo(T_).Struct;
+            const struct_info = @typeInfo(T_).@"struct";
             var generic = try std.json.parseFromSlice(std.json.Value, allocator_, json_string, .{});
             defer generic.deinit();
             if (generic.value != .object) return;

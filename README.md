@@ -5,8 +5,27 @@ A [Zig](https://ziglang.org/) binding for [MLX](https://github.com/ml-explore/ml
 ## Prerequisites
 
 - Apple Silicon Mac
-- Zig v0.13.0
+- Zig v0.14.0
 - CMake
+
+## Using in your own project
+
+After importing the dependency with `zig fetch --save clone https://github.com/jaco-bro/MLX.zig.git` add something like this to your `build.zig` file:
+
+```fish
+    const mlxzig = b.dependency("mlxzig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.linkLibrary(mlxzig.artifact("mlxzig"));
+    exe_mod.addImport("mlxzig", mlxzig.module("mlxzig"));
+```
+
+this will allow you to import the library in your code like this:
+
+```zig
+const mlx = @import("mlxzig");
+```
 
 ## Getting Started
 
